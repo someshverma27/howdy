@@ -1,48 +1,35 @@
-from radis import calc_spectrum
-import matplotlib.pyplot as plt
-import time
+import numpy as np
+from radis.spectrum.utils import CONVOLUTED_QUANTITIES
 
-time_list, timeC_list, lines_list = [], [], []
-time_list_va, timeC_list_va, lines_list_va = [], [], []
-wmin = 1300
-for engine in ['vaex', 'pandas']:
-    for w_range in [10, 30, 100, 150, 500, 600]: #[100, 200, 500, 900]:
-    # for w_range in [ 50, 1300 ]:
-        t0=time.time()
-        s = calc_spectrum(wmin, wmin + w_range,         # cm-1
-                      molecule='H2O',
-                      isotope='1,2,3',
-                      pressure=1.01325,   # bar
-                      Tgas=1000,           # K
-                      mole_fraction=0.1,
-                    #   wstep='auto',
-                    #   path_length=1,      # cm
-                      databank='hitemp',  # or 'hitemp', 'geisa', 'exomol'
-                      engine=engine,
-                      )
+def solve():
+    from radis import SpectrumFactory
 
-        t1=time.time()
-        # time.sleep(5)
-        if engine == "vaex":
-            timeC_list_va.append(s.conditions['calculation_time'])
-            lines_list_va.append(s.conditions['lines_calculated'])
-            time_list_va.append(t1 - t0)
-            # lines_list_va.append(s.conditions['lines_calculated']+s.conditions['lines_cutoff'])
-        else:
-            timeC_list.append(s.conditions['calculation_time'])
-            lines_list.append(s.conditions['lines_calculated'])
-            time_list.append(t1 - t0)
-            # lines_list.append(s.conditions['lines_calculated']+s.conditions['lines_cutoff'])
+    sf_vaex = SpectrumFactory(
+        wavelength_min=4200,
+        wavelength_max=4500,
+        cutoff=1e-23,
+        molecule="CO2",
+        dataframe_type="pandas",
+    )
+    sf_vaex.fetch_databank("hitran")
+    s_vaex = sf_vaex.eq_spectrum(Tgas=2000)  # failing on the 08/03/2023 - minouHub
 
-plt.figure()
-plt.plot(lines_list, time_list, 'k', label='pandas total')
-plt.plot(lines_list, timeC_list, 'k--', label='pandas computation')
-plt.plot(lines_list_va, time_list_va, 'r', label='vaex total')
-plt.plot(lines_list_va, timeC_list_va, 'r--', label='vaex computation')
-plt.ylabel('Time [s]')
-plt.xlabel('Number of lines')
-plt.legend()
-plt.show()
-# print('Time taken : '+str(t1 - t0))
-#
-# print(s.conditions['lines_calculated'])
+    sf_pd = SpectrumFactory(
+        wavelength_min=4200,
+        wavelength_max=4500,
+        cutoff=1e-23,
+        molecule="CO2",
+        dataframe_type="vaex",
+    )
+    sf_pd.fetch_databank("hitran",output="vaex")
+    s_pd = sf_pd.eq_spectrum(Tgas=2000)
+
+    for column in sf_pd.df1.columns:
+        assert np.all(sf_vaex.df1[column] == sf_pd.df1[column].to_numpy())
+
+    for spec_quantity in CONVOLUTED_QUANTITIES:
+        assert np.allclose(
+            s_vaex.get(spec_quantity)[1], s_pd.get(spec_quantity)[1], equal_nan=True
+        )
+
+solve()

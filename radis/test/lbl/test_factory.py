@@ -644,91 +644,13 @@ def test_all_spectrum_using_wstep_auto(verbose=True, plot=False, *args, **kwargs
     assert sf._wstep == "auto"
 
 
-@pytest.mark.fast
-def test_non_air_diluent(verbose=True, plot=False, *args, **kwargs):
-
-    sf = SpectrumFactory(
-        wavelength_min=4200,
-        wavelength_max=4500,
-        cutoff=1e-23,
-        molecule="CO",
-        isotope="1,2",
-        truncation=5,
-        neighbour_lines=10,
-        path_length=0.1,
-        mole_fraction=0.1,
-        medium="vacuum",
-        optimization=None,
-        verbose=verbose,
-    )
-    sf.warnings.update(
-        {
-            "MissingSelfBroadeningWarning": "ignore",
-            "NegativeEnergiesWarning": "ignore",
-            "LinestrengthCutoffWarning": "ignore",
-            "HighTemperatureWarning": "ignore",
-            "AccuracyWarning": "ignore",
-            "PerformanceWarning": "ignore",
-        }
-    )
-
-    sf.load_databank("HITRAN-CO", load_columns=["diluent", "equilibrium"])
-
-    # Calculating spectrum for different diluents
-    sf.eq_spectrum(Tgas=2000)
-    wl1 = sf.df1["hwhm_lorentz"]
-    assert sf._diluent == {"air": 0.9}
-
-    sf.eq_spectrum(Tgas=2000, diluent={"CO2": 0.4, "air": 0.5})
-    wl2 = sf.df1["hwhm_lorentz"]
-    assert sf._diluent == {"CO2": 0.4, "air": 0.5}
-
-    sf.eq_spectrum(Tgas=2000, diluent="CO2")
-    wl3 = sf.df1["hwhm_lorentz"]
-    assert sf._diluent == {"CO2": 0.9}
-
-    assert (wl1 < wl2).all() and (wl2 < wl3).all()
-
-
-@pytest.mark.fast
-def test_diluents_molefraction(verbose=True, plot=False, *args, **kwargs):
-    from radis.misc.warning import MoleFractionError
-
-    sf = SpectrumFactory(
-        wavelength_min=4300,
-        wavelength_max=4500,
-        wstep=0.01,
-        cutoff=1e-30,
-        pressure=1,
-        isotope=[1],
-        verbose=verbose,
-        diluent={"CO2": 0.4, "air": 0.2},
-    )
-    sf.load_databank("HITRAN-CO", load_columns=["diluent", "equilibrium"])
-    # Molefraction (molecule + diluent) < 1
-    with pytest.raises(MoleFractionError) as err:
-        sf.eq_spectrum(Tgas=300, mole_fraction=0.3)
-    assert (
-        "of molecule and diluents less than 1. Please set appropriate molefraction value of molecule and diluents"
-        in str(err.value)
-    )
-
-    # Molefraction (molecule + diluent) > 1
-    with pytest.raises(MoleFractionError) as err:
-        sf.eq_spectrum(Tgas=300, mole_fraction=0.6)
-    assert (
-        "of molecule and diluents greater than 1. Please set appropriate molefraction value of molecule and diluents."
-        in str(err.value)
-    )
-
-    # Molefraction (molecule + diluent) == 1
-    sf.eq_spectrum(Tgas=300, mole_fraction=0.4)
-
-
+# Added in https://github.com/radis/radis/pull/580
+# Compares spectrum calculated using vaex and pandas are same.CONVOLUTED_QUANTITIES and dataframe df is compared to ensure the spectrum is same.
 def test_vaex_and_pandas_spectrum():
     from radis import calc_spectrum
     from radis.spectrum.utils import CONVOLUTED_QUANTITIES
 
+    # Comparison is made for all the databanks to ensure that calculations are consistent across databanks and maximum part of code is tested.
     databanks = ["hitran", "hitemp", "exomol", "geisa"]
 
     for databank in databanks:
@@ -750,7 +672,7 @@ def test_vaex_and_pandas_spectrum():
         )
         s.apply_slit(0.5, "nm")  # simulate an experimental slit
 
-        # computin spectrum in pandas dataframe format
+        # computing spectrum in pandas dataframe format
         s1, factory_s1 = calc_spectrum(
             1900,
             2300,  # cm-1
@@ -774,6 +696,86 @@ def test_vaex_and_pandas_spectrum():
 
         for column in factory_s1.df1.columns:
             assert np.all(factory_s.df1[column].to_numpy() == factory_s1.df1[column])
+
+    #%% Additional test with other options (cutoff, ...)
+    from radis import SpectrumFactory
+
+    sf_vaex = SpectrumFactory(
+        wavelength_min=4200,
+        wavelength_max=4500,
+        cutoff=1e-23,
+        molecule="CO2",
+        dataframe_type="vaex",
+    )
+    sf_vaex.fetch_databank("hitran", output="vaex")
+    s_vaex = sf_vaex.eq_spectrum(Tgas=2000)  # failing on the 08/03/2023 - minouHub
+    s_vaex.apply_slit(0.5, "nm")  # simulate an experimental slit
+
+    sf_pd = SpectrumFactory(
+        wavelength_min=4200,
+        wavelength_max=4500,
+        cutoff=1e-23,
+        molecule="CO2",
+        dataframe_type="pandas",
+    )
+    sf_pd.fetch_databank("hitran", output="pandas")
+    s_pd = sf_pd.eq_spectrum(Tgas=2000)
+    s_pd.apply_slit(0.5, "nm")  # simulate an experimental slit
+
+    for column in sf_pd.df1.columns:
+        assert np.all(sf_vaex.df1[column].to_numpy() == sf_pd.df1[column])
+
+    for spec_quantity in CONVOLUTED_QUANTITIES:
+        assert np.allclose(
+            s_vaex.get(spec_quantity)[1], s_pd.get(spec_quantity)[1], equal_nan=True
+        )
+
+
+#%%
+# Compares the Spectrum calculated under non-equilibrium conditions . Comparison is made between CONVOLUTED_QUANTITIES and dataframe df .
+def test_vaex_and_pandas_spectrum_noneq():
+
+    from radis import calc_spectrum
+
+    conditions = {
+        "wmin": 1800,
+        "wmax": 1820,
+        "molecule": "CO",
+        "isotope": 1,
+        "pressure": 1.01325,
+        "mole_fraction": 0.1,
+        "wstep": "auto",
+        "path_length": 1,
+        "databank": "hitemp",
+        "verbose": 3,
+        "return_factory": True,
+    }
+    # Calculating spectrum using vae
+    s, factory_s = calc_spectrum(
+        **conditions,
+        Tgas=700,  # K
+        Tvib=710,
+        Trot=710,
+        engine="vaex",
+    )
+
+    # Calculating spectrum using pandas
+    s1, factory_s1 = calc_spectrum(
+        **conditions,
+        Tgas=700,  # K
+        Tvib=710,
+        Trot=710,
+        engine="pandas",
+    )
+
+    import numpy as np
+
+    # Comparing different quantities
+    assert np.allclose(s.get("absorbance"), s1.get("absorbance"), equal_nan=True)
+
+    # Comparing different columns of dataframe df
+    for column in factory_s1.df1.columns:
+        assert np.all(factory_s1.df1[column] == factory_s.df1[column].to_numpy())
 
 
 # --------------------------

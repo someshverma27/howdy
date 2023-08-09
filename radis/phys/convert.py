@@ -17,6 +17,7 @@ Get equivalent width in nm of a 10cm-1 width at 380 nm
 """
 
 import numpy as np
+import vaex
 
 from radis.phys.air import air2vacuum, vacuum2air
 from radis.phys.constants import c, eV, h, hc_k, k_b
@@ -168,6 +169,21 @@ def nm2hz(lbd_nm):
     return c * 1e9 / lbd_nm
 
 
+# Function for safe division
+
+
+def zero2inf(x):
+    try:
+        x[x == 0] = np.inf
+        return x
+    except (TypeError):
+        return x if x else np.inf
+
+
+def div_safe(f):
+    return lambda x: f(zero2inf(x))
+
+
 # Convert Broadenings
 
 
@@ -313,11 +329,22 @@ def atm2bar(p_atm):
     return p_atm * 1.01325
 
 
+def true_for_all(E):
+    return E.unique() == [True]
+
+
+def false_for_all(E):
+    return E.unique() == [False]
+
+
 # %% Assert functions
 
 
 def _magn(x):
-    return np.round((np.log10(np.abs(x))))
+    if isinstance(x, vaex.expression.Expression):
+        return x.abs().log10().round()
+    else:
+        return np.round((np.log10(np.abs(x))))
 
 
 def _assertK(E):
@@ -330,12 +357,20 @@ def _assertK(E):
 
 
 def _assertcm(E):
-    if np.sum(np.abs(E)) != 0:  # check E != 0 for both floats and arrays
-        try:
-            m = _magn(E)
-            assert ((1 <= m) & (m <= 5)).all()
-        except AssertionError:
-            print(("Warning. Input values may not be in cm-1", E, "cm-1?"))
+    if isinstance(E, vaex.expression.Expression):
+        if E.abs().sum():  # check E != 0 for both floats and arrays
+            try:
+                m = _magn(E)
+                assert true_for_all(((1 <= m) & (m <= 5)))
+            except AssertionError:
+                print(("Warning. Input values may not be in cm-1", E, "cm-1?"))
+    else:
+        if np.sum(np.abs(E)) != 0:  # check E != 0 for both floats and arrays
+            try:
+                m = _magn(E)
+                assert ((1 <= m) & (m <= 5)).all()
+            except AssertionError:
+                print(("Warning. Input values may not be in cm-1", E, "cm-1?"))
 
 
 def _asserteV(E):

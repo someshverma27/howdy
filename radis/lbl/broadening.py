@@ -64,6 +64,7 @@ Formula in docstrings generated with :py:func:`~pytexit.pytexit.py2tex` ::
 from warnings import warn
 
 import numpy as np
+import vaex
 from numba import float64, jit
 from numpy import arange, exp
 from numpy import log as ln
@@ -301,6 +302,8 @@ def pressure_broadening_HWHM(
     References
     ----------
 
+    For self (resonant) and air broadening :
+
     .. math::
 
         \\gamma_{lb}={\\left(\\frac{T_{ref}}{T_{gas}}\\right)}^{n_{air}} \\gamma_{air} P \\left(1-x\\right)+{\\left(\\frac{T_{ref}}{T_{gas}}\\right)}^{n_{self}} \\gamma_{self} P x
@@ -310,6 +313,17 @@ def pressure_broadening_HWHM(
     HWHM broadening tabulated at :math:`T_{ref}`, :math:`x` the ``mole_fraction``.
 
     .. [1] `Rothman 1998 (HITRAN 1996) eq (A.14) <https://www.sciencedirect.com/science/article/pii/S0022407398000788>`_
+
+
+
+
+    For multiple diluents with respective mole fractions ```x_{air}```, ```x_i``` , ```x_j```, etc. :
+
+    .. math::
+
+        \\gamma_{lb}={\\left(\\frac{T_{ref}}{T_{gas}}\\right)}^{n_{air}} \\gamma_{air} P x_{air} +{\\left(\\frac{T_{ref}}{T_{gas}}\\right)}^{n_{self}} \\gamma_{self} P x + {\\left(\\frac{T_{ref}}{T_{gas}}\\right)}^{n_{i}} \\gamma_{i} P x_{i} + {\\left(\\frac{T_{ref}}{T_{gas}}\\right)}^{n_{i}} \\gamma_{j} P x_{j} + ...
+
+
 
     See Also
     --------
@@ -321,47 +335,40 @@ def pressure_broadening_HWHM(
 
     # Temperature and pressure dependent half width
     # ... Reference: Rothman 1998 (HITRAN 1996) eq (A.12)
-    # ... Hypothesis: we only consider self broadening, and air broadening,
-    # ... weighted with mole fractions
-
-    # Note: if not Tdpsel in dg Tdpair is used. Lookup parent function
-    # | dev note: in that case we simplify the expression by calculation the
-    # | power function once only.
+    # ... Hypothesis: we consider self broadening, air broadening, and include the effect
+    # ... of other collisioners in the 'diluent' dictionary, weighted with mole fractions
 
     # check if gamma_diluent and n_diluent exists or not and in case they are not present use broadening coefficient of air instead
     gamma_lb = 0
     for diluent_molecule, diluent_mole_fraction in diluent.items():
-        try:
-            gamma_lb += (
-                (Tref / Tgas)
-                ** diluent_broadening_coeff["n_" + diluent_molecule.lower()]
-            ) * (
-                diluent_broadening_coeff["gamma_" + diluent_molecule.lower()]
-                * pressure_atm
-                * diluent_mole_fraction
-            )
-        except KeyError:
-            # import warnings
-            # from radis.misc.warning import AccuracyWarning
-            # if diluent_molecule != "air":
-            #     warnings.warn(
-            #         AccuracyWarning(
-            #             "Broadening Coefficient of "+diluent_molecule+" not present in database using broadening coefficient of air instead. \n!!! Solution: Try using once `use_cached='regen'' in calc_spectrum!!!"
-            #         )
-            #     )
-
+        diluent_name = diluent_molecule.lower()
+        if "n_" + diluent_name in diluent_broadening_coeff:
+            n_i = diluent_broadening_coeff["n_" + diluent_name]
+        else:
             ## A warning is normally raised already in '_calc_broadening_HWHM' when constructing the dict diluent_broadening_coef
-            gamma_lb += ((Tref / Tgas) ** Tdpair) * (
-                (airbrd * pressure_atm * diluent["air"])
-            )
-    # Adding self coefficient
+            n_i = Tdpair
+        # @dev: if n_air is not defined, then add another default. #TODO
+        if "gamma_" + diluent_name in diluent_broadening_coeff:
+            gamma_i = diluent_broadening_coeff["gamma_" + diluent_name]
+        else:
+            ## A warning is normally raised already in '_calc_broadening_HWHM' when constructing the dict diluent_broadening_coef
+            gamma_i = airbrd
+        # @dev: if gamma_air is not defined, then add another default. #TODO
+
+        gamma_lb += (
+            (Tref / Tgas) ** n_i * gamma_i * pressure_atm * diluent_mole_fraction
+        )
+
+    assert mole_fraction + sum(diluent.values()) == 1
+
+    # Adding self (resonant) broadening and temperature dependance self coefficient
+    # ... if Tdpsel is not in `dg` then Tdpair is used.
     if Tdpsel is None:  # use Tdpair instead
         gamma_lb += ((Tref / Tgas) ** Tdpair) * (
             (selbrd * pressure_atm * mole_fraction)
         )
     else:
         gamma_lb += ((Tref / Tgas) ** Tdpsel) * (selbrd * pressure_atm * mole_fraction)
-    # raise KeyError("Column not found {0}".format(err))
 
     return gamma_lb
 
@@ -894,38 +901,37 @@ class BroadenFactory(BaseFactory):
         diluent_broadening_coeff = {}
 
         for key in diluent:
-            if self.dataframe_type == "pandas":
-                try:
-                    diluent_broadening_coeff["gamma_" + key.lower()] = df[
-                        "gamma_" + key.lower()
-                    ]
-                    diluent_broadening_coeff["n_" + key.lower()] = df[
-                        "n_" + key.lower()
-                    ]
-                except KeyError:
-                    if key != "air":
-                        self.warn(
-                            message="Broadening Coefficient of "
-                            + key
-                            + " not present in database using broadening coefficient of air instead. \n!!! Solution: Try using once `use_cached='regen'' in calc_spectrum!!!",
-                            category="AccuracyWarning",
-                        )
-            elif self.dataframe_type == "vaex":
-                try:
-                    diluent_broadening_coeff["gamma_" + key.lower()] = df[
-                        "gamma_" + key.lower()
-                    ]
-                    diluent_broadening_coeff["n_" + key.lower()] = df[
-                        "n_" + key.lower()
-                    ]
-                except NameError:
-                    if key != "air":
-                        self.warn(
-                            message="Broadening Coefficient of "
-                            + key
-                            + " not present in database using broadening coefficient of air instead. \n!!! Solution: Try using once `use_cached='regen'' in calc_spectrum!!!",
-                            category="AccuracyWarning",
-                        )
+            if key == "air":
+                # no need to add broadening dictionary with air, as "airbrd" and "Tdpair" is already in the dataframe
+                continue
+            diluent_name = key.lower()
+            if "gamma_" + diluent_name in df.columns:
+                diluent_broadening_coeff["gamma_" + diluent_name] = df[
+                    "gamma_" + diluent_name
+                ]
+            else:
+                self.warn(
+                    message="Broadening Coefficient of "
+                    + key
+                    + " not present in database. \nIf the database should include these coefficients, try removing the cache by using once `use_cached='regen'' in calc_spectrum. If not, you can silence this error by using `warnings['MissingDiluentBroadeningWarning']='ignore'`.\nThe broadening coefficient of air is used instead.",
+                    category="MissingDiluentBroadeningWarning",
+                )
+                diluent_broadening_coeff["gamma_" + diluent_name] = df[
+                    "airbrd"
+                ]  # note @dev : check it doesn't create a new memory object
+
+            if "n_" + diluent_name in df.columns:
+                diluent_broadening_coeff["n_" + diluent_name] = df["n_" + diluent_name]
+            else:
+                self.warn(
+                    message="Temperature dependance of Broadening Coefficient of "
+                    + key
+                    + " not present in database. \nIf the database should include these coefficients, try removing the cache by using once `use_cached='regen'' in calc_spectrum. If not, you can silence this error by using `warnings['MissingDiluentBroadeningTdepWarning']='ignore'`.\nThe temperature-dependance coefficient of air is used instead.",
+                    category="MissingDiluentBroadeningTdepWarning",
+                )
+                diluent_broadening_coeff["n_" + diluent_name] = df[
+                    "Tdpair"
+                ]  # note @dev : check it doesn't create a new memory object
 
         # Get broadenings
         if broadening_method == "voigt":
@@ -1254,7 +1260,7 @@ class BroadenFactory(BaseFactory):
 
         # Prepare vectorized operations:
         try:  # make it a (1, N) row vector
-            if self.dataframe_type == "pandas":
+            if isinstance(gamma_lb, np.ndarray) or self.dataframe_type == "pandas":
                 gamma_lb = gamma_lb.values.reshape((1, -1))
             elif self.dataframe_type == "vaex":
                 gamma_lb = gamma_lb.to_numpy().reshape((1, -1))
@@ -1392,8 +1398,6 @@ class BroadenFactory(BaseFactory):
             columns = dg.column_names
         elif self.dataframe_type == "pandas":
             columns = list(dg.keys())
-        else:
-            raise NotImplementedError(self.dataframe_type)
 
         if not "hwhm_voigt" in columns:
             raise KeyError(
@@ -1489,8 +1493,12 @@ class BroadenFactory(BaseFactory):
         shifted_wavenum = dg.shiftwav
 
         try:  # make it a row vector
-            shifted_wavenum = shifted_wavenum.values.reshape((1, -1))
-            N = len(dg)
+            if self.dataframe_type == "pandas":
+                shifted_wavenum = shifted_wavenum.values.reshape((1, -1))
+                N = len(dg)
+            elif self.dataframe_type == "vaex":
+                shifted_wavenum = shifted_wavenum.to_numpy().reshape((1, -1))
+                N = len(dg)
         except AttributeError:  # probably not a dataframe: one line only.
             assert type(shifted_wavenum) is np.float64
             N = 1
@@ -1807,10 +1815,13 @@ class BroadenFactory(BaseFactory):
         )  # calculation vector of wavenumbers (shape W + space B on the sides)
 
         # Vectorize the chunk of lines
-        if self.dataframe_type == "pandas":
+        if isinstance(broadened_param, np.ndarray):
             S = broadened_param.reshape((1, -1))
         elif self.dataframe_type == "vaex":
             S = broadened_param.to_numpy().reshape((1, -1))
+        else:
+            raise NotImplementedError
+
         shifted_wavenum = shifted_wavenum.reshape((1, -1))  # make it a row vector
 
         # Get truncation array
@@ -2005,8 +2016,11 @@ class BroadenFactory(BaseFactory):
         ki0, ki1, tvi = self._get_indices(shifted_wavenum, wavenumber_calc)
 
         if self.dataframe_type == "vaex":
-            li0, li1, tGi = self._get_indices((np.log(wG_dat)).to_numpy(), np.log(wG))
-            mi0, mi1, tLi = self._get_indices((np.log(wL_dat)).to_numpy(), np.log(wL))
+            # TODO : check memory usage & if there is no other implementation without numpy conversion
+            wG_dat = wG_dat.to_numpy()
+            wL_dat = wL_dat.to_numpy()
+            li0, li1, tGi = self._get_indices(np.log(wG_dat), np.log(wG))
+            mi0, mi1, tLi = self._get_indices(np.log(wL_dat), np.log(wL))
         elif self.dataframe_type == "pandas":
             li0, li1, tGi = self._get_indices(np.log(wG_dat), np.log(wG))
             mi0, mi1, tLi = self._get_indices(np.log(wL_dat), np.log(wL))
@@ -2452,10 +2466,12 @@ class BroadenFactory(BaseFactory):
                             )
                         )
 
+                    # Cut lines in smaller bits for better memory handling
                     if self.dataframe_type == "pandas":
                         df = df.groupby(arange(len(df)) % N)
                     elif self.dataframe_type == "vaex":
-                        df["idx"] = np.arange(len(df)) % N
+                        # idx is added to as vaex don't have index column . Then df is divided into chunks
+                        df["idx"] = vaex.vrange(0, len(df)) % N
                         df = df.groupby(df.idx)
 
                     for i, (_, dg) in enumerate(df):
@@ -2473,10 +2489,12 @@ class BroadenFactory(BaseFactory):
                     # Iterating over the chunks of the line database
                     # Using DIT Algorithm calculations for optimized loops
 
+                    # Cut lines in smaller bits for better memory handlin
                     if self.dataframe_type == "pandas":
                         df = df.groupby(arange(len(df)) % N)
                     elif self.dataframe_type == "vaex":
-                        df["idx"] = np.arange(len(df)) % N
+                        # idx is added to as vaex don't have index column . Then df is divided into chunks
+                        df["idx"] = vaex.vrange(0, len(df)) % N
                         df = df.groupby(df.idx)
 
                     for i, (_, dg) in enumerate(df):
@@ -2810,7 +2828,7 @@ class BroadenFactory(BaseFactory):
         self.profiler.start("weak_lines", 2, "... classifying lines as weak or strong")
         # Get approximate spectral absorption coefficient
         rough_spectrum, S_density_on_grid, line2grid_proj_left = project_lines_on_grid(
-            df, wavenumber_calc, wstep
+            df, wavenumber_calc, wstep, self.dataframe_type
         )
 
         #     :
@@ -2923,7 +2941,7 @@ class BroadenFactory(BaseFactory):
             # Calculate continuum
             if noneq:
                 k_continuum, j_continuum, _, _, _ = project_lines_on_grid_noneq(
-                    df_weak_lines, wavenumber_calc, wstep
+                    df_weak_lines, wavenumber_calc, wstep, self.dataframe_type
                 )
 
                 if __debug__:
@@ -2946,7 +2964,7 @@ class BroadenFactory(BaseFactory):
 
             else:
                 k_continuum, _, _ = project_lines_on_grid(
-                    df_weak_lines, wavenumber_calc, wstep
+                    df_weak_lines, wavenumber_calc, wstep, self.dataframe_type
                 )
 
                 if __debug__:
@@ -3040,7 +3058,7 @@ class BroadenFactory(BaseFactory):
         return abscoeff_v
 
 
-def project_lines_on_grid(df, wavenumber, wstep):
+def project_lines_on_grid(df, wavenumber, wstep, dataframe_type="pandas"):
     """Quickly sums all lines on wavespace grid as rectangles of HWHM
     corresponding to ``hwhm_voigt`` and a spectral absorption coefficient value so
     that linestrength is conserved.
@@ -3071,9 +3089,15 @@ def project_lines_on_grid(df, wavenumber, wstep):
         ``wavenumber``. Size ``N``
     """
 
-    shiftwav = df.shiftwav.values  # cm-1  ,   size N (number of lines)
-    S = df.S.values  # cm/#  ~   cm-1/(#.cm-2)  ,   size N
-    wv = df.hwhm_voigt.values * 2  # HWHM > FWHM
+    if dataframe_type == "pandas":
+        shiftwav = df.shiftwav.values  # cm-1  ,   size N (number of lines)
+        S = df.S.values  # cm/#  ~   cm-1/(#.cm-2)  ,   size N
+        wv = df.hwhm_voigt.values * 2  # HWHM > FWHM
+    elif dataframe_type == "vaex":
+        # TODO : check memory usage & if there is no other implementation without numpy conversion
+        shiftwav = df.shiftwav.to_numpy()  # cm-1  ,   size N (number of lines)
+        S = df.S.to_numpy()  # cm/#  ~   cm-1/(#.cm-2)  ,   size N
+        wv = df.hwhm_voigt.to_numpy() * 2  # HWHM > FWHM
 
     # ... First get closest matching line (left, and right):
     iwav_on_grid_left = np.searchsorted(wavenumber, shiftwav.T, side="left").ravel() - 1
@@ -3174,7 +3198,7 @@ def project_lines_on_grid(df, wavenumber, wstep):
     return k_rough_spectrum, S_density_on_grid, line2grid_projection_left
 
 
-def project_lines_on_grid_noneq(df, wavenumber, wstep):
+def project_lines_on_grid_noneq(df, wavenumber, wstep, dataframe_type="pandas"):
     """Quickly sums all lines on wavespace grid as rectangles of HWHM
     corresponding to ``hwhm_voigt`` and a spectral absorption coefficient value so
     that linestrength is conserved.
@@ -3220,10 +3244,17 @@ def project_lines_on_grid_noneq(df, wavenumber, wstep):
     be recomputed from the linestrength).
     """
 
-    shiftwav = df.shiftwav.values  # cm-1  ,   size N (number of lines)
-    S = df.S.values  # cm/#  ~   cm-1/(#.cm-2)  ,   size N
-    Ei = df.Ei.values  # mW/cm3/sr
-    wv = df.hwhm_voigt.values * 2  # HWHM > FWHM
+    if dataframe_type == "pandas":
+        shiftwav = df.shiftwav.values  # cm-1  ,   size N (number of lines)
+        S = df.S.values  # cm/#  ~   cm-1/(#.cm-2)  ,   size N
+        Ei = df.Ei.values  # mW/cm3/sr
+        wv = df.hwhm_voigt.values * 2  # HWHM > FWHM
+    elif dataframe_type == "vaex":
+        # TODO : check memory usage & if there is no other implementation without numpy conversion
+        shiftwav = df.shiftwav.to_numpy()  # cm-1  ,   size N (number of lines)
+        S = df.S.to_numpy()  # cm/#  ~   cm-1/(#.cm-2)  ,   size N
+        Ei = df.Ei.to_numpy()  # mW/cm3/sr
+        wv = df.hwhm_voigt.to_numpy() * 2  # HWHM > FWHM
 
     # ... First get closest matching line (left, and right):
     iwav_on_grid_left = np.searchsorted(wavenumber, shiftwav.T, side="left").ravel() - 1
